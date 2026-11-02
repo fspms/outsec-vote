@@ -432,12 +432,12 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
         if (st === 'SUBSCRIBED') { S.fails = 0; if (S.phase === 'connecting' || S.phase === 'off') { S.phase = S.close ? 'result' : S.q ? 'question' : 'idle'; render(); } hello(); }
         else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT' || st === 'CLOSED') fail();
       });
-      // Canal des votes : écriture seule (aucun droit de lecture pour les téléphones).
-      chVotes.subscribe(function (st) { if (my === gen && (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT')) fail(); });
+      // Canal des votes : jamais rejoint (les téléphones n'ont aucun droit de lecture dessus) ;
+      // les envois partent en HTTP (httpSend), autorisés par la seule politique d'écriture.
     } catch (e) { if (my === gen) fail(); }
   }
 
-  function hello() { if (chVotes) chVotes.send({ type: 'broadcast', event: 'hello', payload: { d: device } }).catch(function () {}); }
+  function hello() { if (chVotes) chVotes.httpSend('hello', { d: device }).catch(function () {}); }
 
   function onIdle(p) {
     if (!p) return;
@@ -465,8 +465,8 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     var q = S.q;
     S.mine = i; render(); // verrouillage immédiat de l'interface
     var r;
-    try { r = await chVotes.send({ type: 'broadcast', event: 'vote', payload: { sid: q.sid, qid: q.qid, c: i, d: device } }); } catch (e) { r = 'error'; }
-    if (r === 'ok') store('os_v_' + q.sid + '_' + q.qid, String(i));
+    try { r = await chVotes.httpSend('vote', { sid: q.sid, qid: q.qid, c: i, d: device }); } catch (e) { r = null; }
+    if (r && r.success) store('os_v_' + q.sid + '_' + q.qid, String(i));
     else if (S.q === q) { S.mine = null; render(); } // envoi échoué : on peut réessayer
   }
 

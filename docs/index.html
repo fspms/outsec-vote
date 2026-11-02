@@ -283,7 +283,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       off: 'Connexion perdue — reconnexion…', bad: 'Code invalide (5 caractères).',
       noRoom: 'Impossible de rejoindre cette salle. Vérifiez le code ou redemandez le QR code.',
       change: 'Changer de salle', votes: 'votes',
-      priv: 'Aucune donnée personnelle collectée. Un identifiant technique anonyme et un jeton aléatoire stocké sur cet appareil servent uniquement à limiter chaque appareil à un vote par question.'
+      priv: 'Aucune donnée personnelle collectée. Un identifiant technique anonyme, stocké sur cet appareil, sert uniquement à limiter chaque appareil à un vote par question (le choix lui-même n’est pas conservé).'
     },
     en: {
       code: 'Room code', join: 'Join', conn: 'Connecting…',
@@ -293,7 +293,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       off: 'Connection lost — reconnecting…', bad: 'Invalid code (5 characters).',
       noRoom: 'Cannot join this room. Check the code or ask for the QR code again.',
       change: 'Change room', votes: 'votes',
-      priv: 'No personal data is collected. An anonymous technical ID and a random token stored on this device are only used to limit each device to one vote per question.'
+      priv: 'No personal data is collected. An anonymous technical ID, stored on this device, is only used to limit each device to one vote per question (your choice itself is not kept).'
     }
   };
 
@@ -304,10 +304,9 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   }
 
   var lang = store('os_lang') || ((navigator.language || 'fr').slice(0, 2).toLowerCase() === 'fr' ? 'fr' : 'en');
-  var device = store('os_dev') || V.randId(24); store('os_dev', device);
 
   var S = { phase: 'code', code: null, q: null, close: null, mine: null, err: null, fails: 0 };
-  var client = null, chState = null, chVotes = null, retryT = null, lastSend = 0, gen = 0;
+  var client = null, chState = null, retryT = null, lastSend = 0, gen = 0;
 
   var view = document.getElementById('view');
   function h(tag, attrs) {
@@ -396,8 +395,8 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
 
   function teardown() {
     gen++; clearTimeout(retryT);
-    try { if (client) { if (chState) client.removeChannel(chState); if (chVotes) client.removeChannel(chVotes); } } catch (e) { /* ignoré */ }
-    chState = chVotes = null;
+    try { if (client) { if (chState) client.removeChannel(chState); } } catch (e) { /* ignoré */ }
+    chState = null;
   }
 
   function join(raw) {
@@ -425,7 +424,6 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       if (my !== gen) return;
       var tp = V.topics(S.code);
       chState = client.channel(tp.state, { config: { private: true } });
-      chVotes = client.channel(tp.votes, { config: { private: true } });
       chState.on('broadcast', { event: 'q' }, function (m) { onQ(m.payload); });
       chState.on('broadcast', { event: 'close' }, function (m) { onClose(m.payload); });
       chState.on('broadcast', { event: 'idle' }, function (m) { onIdle(m.payload); });
@@ -434,12 +432,21 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
         if (st === 'SUBSCRIBED') { S.fails = 0; if (S.phase === 'connecting' || S.phase === 'off') { S.phase = S.close ? 'result' : S.q ? 'question' : 'idle'; render(); } hello(); }
         else if (st === 'CHANNEL_ERROR' || st === 'TIMED_OUT' || st === 'CLOSED') fail();
       });
-      // Canal des votes : jamais rejoint (les téléphones n'ont aucun droit de lecture dessus) ;
-      // les envois partent en HTTP (httpSend), autorisés par la seule politique d'écriture.
+      // Les votes ne passent pas par Realtime : fonction Edge « vote » (utilisateur authentifié,
+      // un seul vote par question, relais vers le présentateur).
     } catch (e) { if (my === gen) fail(); }
   }
 
-  function hello() { if (chVotes) chVotes.httpSend('hello', { d: device }).catch(function () {}); }
+  // Appel de la fonction Edge ; renvoie le statut HTTP (200 = accepté, 0 = réseau).
+  async function callVote(body) {
+    try {
+      var r = await client.functions.invoke('vote', { body: body });
+      if (!r.error) return 200;
+      return (r.error.context && r.error.context.status) || 0;
+    } catch (e) { return 0; }
+  }
+
+  function hello() { if (client && S.code) callVote({ code: S.code, hello: true }); }
 
   function onIdle(p) {
     if (!p) return;
@@ -462,13 +469,12 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   }
 
   async function vote(i) {
-    if (S.phase !== 'question' || S.mine !== null || !chVotes) return;
+    if (S.phase !== 'question' || S.mine !== null || !client) return;
     var now = Date.now(); if (now - lastSend < 500) return; lastSend = now;
     var q = S.q;
     S.mine = i; render(); // verrouillage immédiat de l'interface
-    var r;
-    try { r = await chVotes.httpSend('vote', { sid: q.sid, qid: q.qid, c: i, d: device }); } catch (e) { r = null; }
-    if (r && r.success) store('os_v_' + q.sid + '_' + q.qid, String(i));
+    var st = await callVote({ code: S.code, sid: q.sid, qid: q.qid, c: i });
+    if (st === 200 || st === 409) store('os_v_' + q.sid + '_' + q.qid, String(i)); // 409 : déjà enregistré par le serveur
     else if (S.q === q) { S.mine = null; render(); } // envoi échoué : on peut réessayer
   }
 

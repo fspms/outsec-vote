@@ -80,6 +80,8 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   var CODE_RE = /^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{5}$/;
   var REPUBLISH_MS = 5000;
   var MAX_VOTERS = 500;
+  var PEOPLE_TTL = 100000; // un téléphone est « connecté » s'il a donné signe de vie (hello, ping, vote) il y a moins de 100 s
+  var MAX_SEEN = 2000;
 
   // Tirage sans biais : on rejette les octets >= 248 (= 31 × 8).
   function genCode(cryptoObj) {
@@ -145,6 +147,23 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
     var chState = null, chVotes = null, tick = null, lastHello = 0;
     var voters = new Map(); // d -> index : un seul vote par appareil et par question
     var counts = [];
+    var seen = new Map(); // d (compte anonyme) -> dernier signe de vie
+    var lastPeople = -1;
+
+    function people() {
+      var t = Date.now(), n = 0;
+      seen.forEach(function (ts, k) { if (t - ts > PEOPLE_TTL) seen.delete(k); else n++; });
+      return n;
+    }
+    function notifyPeople() {
+      var n = people();
+      if (n !== lastPeople) { lastPeople = n; if (opts.onPeople) opts.onPeople(n); }
+    }
+    function touch(d) {
+      if (typeof d !== 'string' || d.length < 8 || d.length > 64) return;
+      if (!seen.has(d) && seen.size >= MAX_SEEN) return;
+      seen.set(d, Date.now()); notifyPeople();
+    }
 
     function send(event, payload) {
       if (!chState) return Promise.resolve('error');
@@ -166,11 +185,15 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       if (!validVote(p, host.sid, host.current.qid, counts.length)) return;
       if (voters.has(p.d) || voters.size >= MAX_VOTERS) return; // vote définitif
       voters.set(p.d, p.c);
+      touch(p.d);
       counts[p.c]++;
       if (opts.onVotes) opts.onVotes(counts.slice(), voters.size);
     }
 
-    function onHello() {
+    function onPing(msg) { touch(msg && msg.payload && msg.payload.d); }
+
+    function onHello(msg) {
+      touch(msg && msg.payload && msg.payload.d);
       var t = Date.now();
       if (t - lastHello < 1000) return; // anti-rafale
       lastHello = t;
@@ -211,8 +234,9 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
         chVotes = client.channel(tp.votes, { config: { private: true } });
         chVotes.on('broadcast', { event: 'vote' }, onVote);
         chVotes.on('broadcast', { event: 'hello' }, onHello);
+        chVotes.on('broadcast', { event: 'ping' }, onPing);
         await Promise.all([subscribe(chState), subscribe(chVotes)]);
-        var setI = timers.setInterval; tick = setI(publishCurrent, REPUBLISH_MS);
+        var setI = timers.setInterval; tick = setI(function () { publishCurrent(); notifyPeople(); }, REPUBLISH_MS);
         status('open');
         publishCurrent();
         return code;
@@ -231,6 +255,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
 
     host.getCounts = function () { return counts.slice(); };
     host.total = function () { return voters.size; };
+    host.people = people;
 
     host.close = function () {
       if (!host.current || !host.open) return null;
@@ -259,7 +284,7 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
   }
 
   var api = {
-    ALPHABET: ALPHABET, CODE_RE: CODE_RE, REPUBLISH_MS: REPUBLISH_MS,
+    ALPHABET: ALPHABET, CODE_RE: CODE_RE, REPUBLISH_MS: REPUBLISH_MS, PING_MS: 30000,
     genCode: genCode, randId: randId, topics: topics, normCode: normCode,
     validVote: validVote, winner: winner, createHost: createHost
   };
@@ -445,6 +470,9 @@ Resources:`;for(let t of c){if(!t||typeof t!=`string`)throw Error(`@supabase/aut
       return (r.error.context && r.error.context.status) || 0;
     } catch (e) { return 0; }
   }
+
+  // Signe de vie périodique : le présentateur affiche le nombre de connectés.
+  setInterval(function () { if (client && S.code && S.phase !== 'code' && S.phase !== 'connecting') callVote({ code: S.code, ping: true }); }, V.PING_MS);
 
   function hello() { if (client && S.code) callVote({ code: S.code, hello: true }); }
 
